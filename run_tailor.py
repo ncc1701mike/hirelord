@@ -18,7 +18,7 @@ from hirelord.agents.tailor import tailor_for_job, resume_after_review
 from dotenv import load_dotenv
 load_dotenv()
 import os
-print("API KEY:", os.environ.get("ANTHROPIC_API_KEY", "NOT FOUND")[:20])
+
 
 console = Console()
 
