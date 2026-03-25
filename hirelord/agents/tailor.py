@@ -25,11 +25,14 @@ import uuid
 from pathlib import Path
 from typing import Optional, Literal
 from typing_extensions import TypedDict
+from dotenv import load_dotenv
+load_dotenv()
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.sqlite import SqliteSaver
+# from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt, Command
 
 from ..prompts.tailor import (
@@ -53,7 +56,7 @@ ROOT = Path(__file__).parent.parent.parent
 RESUME_PATH = ROOT / "data" / "MIKE_DORAN_UnityResume_Current_2024.docx"
 OUTPUT_DIR = ROOT / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
-DB_PATH = ROOT / "hirelord.db"
+# DB_PATH = ROOT / "hirelord.db"
 
 # ── Models ────────────────────────────────────────────────────────────────────
 
@@ -341,7 +344,7 @@ def save_outputs(state: TailoringState) -> dict:
 
 # ── Graph ─────────────────────────────────────────────────────────────────────
 
-def build_tailor_graph() -> tuple:
+def build_tailor_graph(): # -> tuple:
     """Build and compile the tailoring graph with SQLite checkpointer."""
 
     builder = StateGraph(TailoringState)
@@ -370,11 +373,19 @@ def build_tailor_graph() -> tuple:
     builder.add_edge("skip_job",           END)
 
     # SQLite checkpointer — required for interrupt() to work
-    checkpointer = SqliteSaver.from_conn_string(str(DB_PATH))
+    checkpointer = MemorySaver()
     graph = builder.compile(checkpointer=checkpointer)
+    return graph
 
-    return graph, checkpointer
 
+# ── Singleton graph instance ──────────────────────────────────────────────────
+_graph_instance = None
+
+def get_graph():
+    global _graph_instance
+    if _graph_instance is None:
+        _graph_instance = build_tailor_graph()
+    return _graph_instance
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -391,7 +402,7 @@ async def tailor_for_job(
     Main entry point: run the full tailoring pipeline for one job.
     Returns the final state dict.
     """
-    graph, _ = build_tailor_graph()
+    graph = get_graph()
 
     if thread_id is None:
         thread_id = str(uuid.uuid4())
@@ -428,16 +439,8 @@ async def tailor_for_job(
     return result
 
 
-def resume_after_review(
-    thread_id: str,
-    action: str,
-    feedback: str = "",
-) -> dict:
-    """
-    Resume a paused graph after human review.
-    action: "approve" | "edit" | "reject"
-    """
-    graph, _ = build_tailor_graph()
+def resume_after_review(thread_id, action, feedback=""):
+    graph = get_graph()
     config = {"configurable": {"thread_id": thread_id}}
     result = graph.invoke(
         Command(resume={"action": action, "feedback": feedback}),

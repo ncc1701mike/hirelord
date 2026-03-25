@@ -14,8 +14,11 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
-
 from hirelord.agents.tailor import tailor_for_job, resume_after_review
+from dotenv import load_dotenv
+load_dotenv()
+import os
+print("API KEY:", os.environ.get("ANTHROPIC_API_KEY", "NOT FOUND")[:20])
 
 console = Console()
 
