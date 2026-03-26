@@ -16,12 +16,18 @@ from .models import CREATE_TABLES
 DB_PATH = Path(__file__).parent.parent.parent / "hirelord.db"
 
 
-async def get_db() -> aiosqlite.Connection:
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def get_db():
     db = await aiosqlite.connect(str(DB_PATH))
     db.row_factory = aiosqlite.Row
     await db.executescript(CREATE_TABLES)
     await db.commit()
-    return db
+    try:
+        yield db
+    finally:
+        await db.close()
 
 
 # ── Audit trail ───────────────────────────────────────────────────────────────
@@ -68,7 +74,7 @@ async def upsert_job(
     posted_at: str = "",
     expires_at: str = "",
 ) -> str:
-    async with await get_db() as db:
+    async with get_db() as db:
         if url:
             cursor = await db.execute(
                 "SELECT id FROM jobs WHERE url = ?", (url,)
@@ -129,7 +135,7 @@ async def update_job_screening(
     keyword_matches: list = None,
     description_summary: str = "",
 ) -> None:
-    async with await get_db() as db:
+    async with get_db() as db:
         cursor = await db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
         row = await cursor.fetchone()
         old_status = row["status"] if row else "new"
@@ -161,7 +167,7 @@ async def update_job_screening(
 
 
 async def update_job_company_context(job_id: str, context: str) -> None:
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE jobs SET company_context = ? WHERE id = ?",
             (context, job_id)
@@ -172,7 +178,7 @@ async def update_job_company_context(job_id: str, context: str) -> None:
 async def update_job_status(
     job_id: str, status: str, notes: str = "", changed_by: str = "system"
 ) -> None:
-    async with await get_db() as db:
+    async with get_db() as db:
         cursor = await db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
         row = await cursor.fetchone()
         old_status = row["status"] if row else None
@@ -188,14 +194,14 @@ async def update_job_status(
 
 
 async def get_job(job_id: str) -> Optional[dict]:
-    async with await get_db() as db:
+    async with get_db() as db:
         cursor = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None
 
 
 async def get_jobs_by_status(status: str) -> list[dict]:
-    async with await get_db() as db:
+    async with get_db() as db:
         cursor = await db.execute(
             "SELECT * FROM jobs WHERE status = ? ORDER BY priority, match_score DESC",
             (status,),
@@ -204,7 +210,7 @@ async def get_jobs_by_status(status: str) -> list[dict]:
 
 
 async def get_strong_matches() -> list[dict]:
-    async with await get_db() as db:
+    async with get_db() as db:
         cursor = await db.execute(
             """SELECT * FROM jobs
                WHERE match_tier IN ('strong','good') AND status = 'screened'
@@ -228,7 +234,7 @@ async def create_application(
 ) -> str:
     app_id = str(uuid.uuid4())
     next_followup = (datetime.now() + timedelta(days=7)).isoformat()
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO applications (
                 id, job_id, resume_text, cover_letter_text, tailoring_notes,
@@ -260,7 +266,7 @@ async def create_application(
 async def update_application_status(
     app_id: str, status: str, notes: str = "", changed_by: str = "human"
 ) -> None:
-    async with await get_db() as db:
+    async with get_db() as db:
         cursor = await db.execute(
             "SELECT status, job_id FROM applications WHERE id = ?", (app_id,)
         )
@@ -296,7 +302,7 @@ async def update_application_status(
 
 
 async def get_applications_due_followup() -> list[dict]:
-    async with await get_db() as db:
+    async with get_db() as db:
         cursor = await db.execute(
             """SELECT a.*, j.title, j.company, j.location,
                       j.description_full, j.requirements_raw
@@ -318,7 +324,7 @@ async def record_followup(
 ) -> str:
     followup_id = str(uuid.uuid4())
     next_followup = (datetime.now() + timedelta(days=7)).isoformat()
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO followups
                (id, application_id, followup_type, message_subject,
@@ -356,7 +362,7 @@ async def save_interview_prep(
     salary_strategy: str = "",
 ) -> str:
     prep_id = str(uuid.uuid4())
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT OR REPLACE INTO interview_prep (
                 id, job_id, application_id,
@@ -380,7 +386,7 @@ async def save_interview_prep(
 
 
 async def get_interview_prep(job_id: str) -> Optional[dict]:
-    async with await get_db() as db:
+    async with get_db() as db:
         cursor = await db.execute(
             "SELECT * FROM interview_prep WHERE job_id = ? ORDER BY generated_at DESC LIMIT 1",
             (job_id,)
@@ -392,7 +398,7 @@ async def get_interview_prep(job_id: str) -> Optional[dict]:
 # ── Pipeline analytics ────────────────────────────────────────────────────────
 
 async def get_pipeline_summary() -> dict:
-    async with await get_db() as db:
+    async with get_db() as db:
         cursor = await db.execute(
             "SELECT status, COUNT(*) as count FROM jobs GROUP BY status"
         )
@@ -430,7 +436,7 @@ async def get_pipeline_summary() -> dict:
 
 
 async def get_full_pipeline() -> list[dict]:
-    async with await get_db() as db:
+    async with get_db() as db:
         cursor = await db.execute(
             """SELECT
                 j.id, j.title, j.company, j.location, j.url,
@@ -466,7 +472,7 @@ async def get_full_pipeline() -> list[dict]:
 
 
 async def get_job_history(job_id: str) -> list[dict]:
-    async with await get_db() as db:
+    async with get_db() as db:
         cursor = await db.execute(
             """SELECT * FROM status_history
                WHERE entity_id = ? OR entity_id IN (

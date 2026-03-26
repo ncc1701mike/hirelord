@@ -152,7 +152,7 @@ async def screen_jobs(state: DiscoveryState) -> dict:
             job_title=job["title"],
             company_name=job["company"],
             location=job.get("location", ""),
-            job_description=job["description"][:4000],
+            job_description=(job.get("description") or "")[:4000],
         )
 
         try:

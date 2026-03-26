@@ -9,6 +9,7 @@ Uses Haiku to extract structured fields from raw JD text:
   - seniority level
   - salary info
   - remote type
+  - description summary
 """
 
 import json
@@ -79,7 +80,7 @@ async def parse_job_description(
     llm = get_parser_llm()
 
     # Truncate very long descriptions to save tokens
-    desc_truncated = description[:6000] if len(description) > 6000 else description
+    desc_truncated = (description or "")[:6000]
 
     prompt = PARSE_HUMAN.format(
         description=desc_truncated,

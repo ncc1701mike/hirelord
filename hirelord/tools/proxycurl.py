@@ -1,20 +1,20 @@
 """
 Hire Lord — Job Discovery Tools
 =================================
-Two discovery sources:
-  1. RapidAPI LinkedIn Job Search API  (paid, ~$0.01/req, free tier available)
-  2. Indeed RSS feeds                   (free, no API key needed)
+Primary source: JSearch API (RapidAPI)
+  - Searches Google for Jobs in real-time
+  - Covers LinkedIn, Indeed, Glassdoor, ZipRecruiter, Dice + more
+  - Free tier: 200 requests/month
+  - Sign up: https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch
 
-Both return normalized JobListing objects ready to feed into the screening pipeline.
+Fallback: Direct company career page RSS (future)
 """
 
 import asyncio
 import hashlib
 import re
-import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import quote_plus
 
 import httpx
 
@@ -27,55 +27,53 @@ class JobListing:
     location: str
     description: str
     url: str
-    source: str                        # "linkedin_rapidapi" | "indeed_rss"
+    source: str
     employment_type: str = "full_time"
-    remote_type: str = ""              # "remote" | "hybrid" | "onsite" | ""
+    remote_type: str = ""
     salary_range_text: str = ""
     posted_at: str = ""
     company_linkedin: str = ""
-    job_id: str = ""                   # source-specific ID for deduplication
+    job_id: str = ""
 
     def __post_init__(self):
-        # Auto-detect remote type from title/description if not set
         if not self.remote_type:
             combined = (self.title + " " + self.location + " " + self.description).lower()
             if "remote" in combined:
                 self.remote_type = "remote"
             elif "hybrid" in combined:
                 self.remote_type = "hybrid"
-            elif self.location and self.location.lower() not in ("", "anywhere"):
+            elif self.location and self.location.lower() not in ("", "anywhere", "united states"):
                 self.remote_type = "onsite"
 
     @property
     def dedup_key(self) -> str:
-        """Stable hash for deduplication — company + normalized title."""
         normalized = re.sub(r"[^a-z0-9]", "", (self.company + self.title).lower())
         return hashlib.md5(normalized.encode()).hexdigest()[:16]
 
 
-# ── RapidAPI LinkedIn Job Search ──────────────────────────────────────────────
+# ── JSearch API (primary source) ──────────────────────────────────────────────
 
-RAPIDAPI_ENDPOINT = "https://linkedin-job-search-api.p.rapidapi.com/active-jb-7d"
+JSEARCH_ENDPOINT = "https://jsearch.p.rapidapi.com/search"
 
-async def search_linkedin_rapidapi(
+async def search_jsearch(
     keywords: list[str],
-    location: str = "United States",
+    api_key: str,
     remote_only: bool = True,
+    days_posted: int = 7,
     limit_per_keyword: int = 10,
-    api_key: str = "",
 ) -> list[JobListing]:
     """
-    Search LinkedIn jobs via RapidAPI.
-    API: https://rapidapi.com/fantastic-jobs-fantastic-jobs-default/api/linkedin-job-search-api
-    Cost: ~$0.01/request on paid tier. Free tier: 100 req/month.
+    Search jobs via JSearch API — pulls from Google for Jobs in real-time.
+    Covers LinkedIn, Indeed, Glassdoor, ZipRecruiter, Dice and more.
     """
     if not api_key:
-        print("  ⚠  RAPIDAPI_KEY not set — skipping LinkedIn RapidAPI search")
+        print("  ⚠  RAPIDAPI_KEY not set — skipping JSearch")
         return []
 
     headers = {
         "x-rapidapi-key":  api_key,
-        "x-rapidapi-host": "linkedin-job-search-api.p.rapidapi.com",
+        "x-rapidapi-host": "jsearch.p.rapidapi.com",
+        "Content-Type":    "application/json",
     }
 
     results = []
@@ -83,165 +81,79 @@ async def search_linkedin_rapidapi(
 
     async with httpx.AsyncClient(timeout=30) as client:
         for keyword in keywords:
+            query = keyword + (" remote" if remote_only else "")
             params = {
-                "keywords":    keyword,
-                "location":    location,
-                "dateSincePosted": "past Week",
-                "jobType":     "full time",
-                "remoteFilter": "remote" if remote_only else "",
-                "salary":      "",
-                "experienceLevel": "",
-                "limit":       str(limit_per_keyword),
-                "page":        "0",
+                "query":        query,
+                "page":         "1",
+                "num_pages":    "1",
+                "date_posted":  "week",
+                "remote_jobs_only": "true" if remote_only else "false",
+                "employment_types": "FULLTIME",
+                "country":      "us",
             }
 
             try:
-                print(f"  🔎 LinkedIn RapidAPI: '{keyword}'...")
-                resp = await client.get(RAPIDAPI_ENDPOINT, headers=headers, params=params)
+                print(f"  🔎 JSearch: '{keyword}'...")
+                resp = await client.get(
+                    JSEARCH_ENDPOINT,
+                    headers=headers,
+                    params=params,
+                )
                 resp.raise_for_status()
                 data = resp.json()
 
-                jobs = data if isinstance(data, list) else data.get("jobs", [])
+                jobs = data.get("data", [])[:limit_per_keyword]
                 for job in jobs:
-                    listing = JobListing(
-                        title=job.get("title", ""),
-                        company=job.get("company", {}).get("name", "") if isinstance(job.get("company"), dict) else job.get("company", ""),
-                        location=job.get("location", ""),
-                        description=job.get("description", ""),
-                        url=job.get("jobUrl", job.get("url", "")),
-                        source="linkedin_rapidapi",
-                        employment_type=job.get("employmentType", "full_time").lower().replace(" ", "_"),
-                        salary_range_text=job.get("salaryRange", ""),
-                        posted_at=job.get("postedAt", ""),
-                        company_linkedin=job.get("company", {}).get("url", "") if isinstance(job.get("company"), dict) else "",
-                        job_id=job.get("id", ""),
+                    # Extract salary text
+                    sal_min = job.get("job_min_salary")
+                    sal_max = job.get("job_max_salary")
+                    sal_period = job.get("job_salary_period", "")
+                    if sal_min and sal_max:
+                        sal_text = f"${sal_min:,.0f} - ${sal_max:,.0f} {sal_period}"
+                    elif sal_min:
+                        sal_text = f"${sal_min:,.0f}+ {sal_period}"
+                    else:
+                        sal_text = ""
+
+                    # Build apply URL
+                    apply_url = (
+                        job.get("job_apply_link") or
+                        job.get("job_google_link") or
+                        ""
                     )
-                    if listing.dedup_key not in seen_keys and listing.title:
-                        seen_keys.add(listing.dedup_key)
-                        results.append(listing)
-
-                await asyncio.sleep(0.5)  # Rate limit courtesy pause
-
-            except httpx.HTTPStatusError as e:
-                print(f"  ❌ LinkedIn RapidAPI error for '{keyword}': {e.response.status_code}")
-            except Exception as e:
-                print(f"  ❌ LinkedIn RapidAPI error for '{keyword}': {e}")
-
-    print(f"  ✅ LinkedIn RapidAPI: {len(results)} unique jobs found")
-    return results
-
-
-# ── Indeed RSS Feed ───────────────────────────────────────────────────────────
-
-INDEED_RSS_BASE = "https://www.indeed.com/rss"
-
-def _build_indeed_rss_url(query: str, location: str = "", remote: bool = True) -> str:
-    """Build an Indeed RSS URL for a keyword + location search."""
-    q = query
-    if remote:
-        q += " remote"
-    params = f"q={quote_plus(q)}"
-    if location:
-        params += f"&l={quote_plus(location)}"
-    params += "&sort=date&fromage=7"  # last 7 days, sorted by date
-    return f"{INDEED_RSS_BASE}?{params}"
-
-
-def _parse_indeed_description(raw_html: str) -> str:
-    """Strip HTML tags from Indeed description."""
-    clean = re.sub(r"<[^>]+>", " ", raw_html)
-    clean = re.sub(r"\s+", " ", clean).strip()
-    return clean[:8000]  # Cap at 8k chars
-
-
-async def search_indeed_rss(
-    keywords: list[str],
-    location: str = "",
-    remote_only: bool = True,
-    limit_per_keyword: int = 15,
-) -> list[JobListing]:
-    """
-    Search Indeed jobs via RSS feed — completely free, no API key.
-    Returns up to limit_per_keyword results per keyword.
-    """
-    results = []
-    seen_keys = set()
-
-    async with httpx.AsyncClient(
-        timeout=30,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; HireLord/1.0)"},
-        follow_redirects=True,
-    ) as client:
-        for keyword in keywords:
-            url = _build_indeed_rss_url(keyword, location, remote_only)
-            try:
-                print(f"  🔎 Indeed RSS: '{keyword}'...")
-                resp = await client.get(url)
-                resp.raise_for_status()
-
-                root = ET.fromstring(resp.text)
-                channel = root.find("channel")
-                if channel is None:
-                    continue
-
-                items = channel.findall("item")[:limit_per_keyword]
-                for item in items:
-                    title_el    = item.find("title")
-                    company_el  = item.find("source")
-                    link_el     = item.find("link")
-                    desc_el     = item.find("description")
-                    date_el     = item.find("pubDate")
-                    guid_el     = item.find("guid")
-
-                    title    = title_el.text    if title_el    is not None else ""
-                    link     = link_el.text     if link_el     is not None else ""
-                    desc_raw = desc_el.text     if desc_el     is not None else ""
-                    posted   = date_el.text     if date_el     is not None else ""
-                    job_id   = guid_el.text     if guid_el     is not None else link
-
-                    # Indeed title format: "Job Title - Company Name - Location"
-                    company = ""
-                    loc_str = ""
-                    if " - " in (title or ""):
-                        parts = title.split(" - ")
-                        if len(parts) >= 3:
-                            title   = parts[0].strip()
-                            company = parts[1].strip()
-                            loc_str = parts[2].strip()
-                        elif len(parts) == 2:
-                            title   = parts[0].strip()
-                            company = parts[1].strip()
-
-                    if company_el is not None and company_el.text:
-                        company = company_el.text
-
-                    description = _parse_indeed_description(desc_raw or "")
 
                     listing = JobListing(
-                        title=title,
-                        company=company or "Unknown",
-                        location=loc_str or location or "Remote",
-                        description=description,
-                        url=link,
-                        source="indeed_rss",
-                        posted_at=posted,
-                        job_id=job_id or link,
+                        title=job.get("job_title", ""),
+                        company=job.get("employer_name", ""),
+                        location=f"{job.get('job_city', '')}, {job.get('job_state', '')}".strip(", "),
+                        description=job.get("job_description", ""),
+                        url=apply_url,
+                        source=f"jsearch:{job.get('job_publisher', 'google')}",
+                        employment_type=job.get("job_employment_type", "FULLTIME").lower(),
+                        remote_type="remote" if job.get("job_is_remote") else "",
+                        salary_range_text=sal_text,
+                        posted_at=job.get("job_posted_at_datetime_utc", ""),
+                        company_linkedin=job.get("employer_linkedin", ""),
+                        job_id=job.get("job_id", ""),
                     )
 
                     if listing.dedup_key not in seen_keys and listing.title:
                         seen_keys.add(listing.dedup_key)
                         results.append(listing)
 
-                await asyncio.sleep(1.0)  # Be a good citizen
+                count = len(jobs)
+                print(f"     → {count} jobs returned")
+                await asyncio.sleep(0.5)
 
-            except ET.ParseError:
-                print(f"  ⚠  Indeed RSS parse error for '{keyword}' — skipping")
             except httpx.HTTPStatusError as e:
-                print(f"  ❌ Indeed RSS error for '{keyword}': {e.response.status_code}")
+                print(f"  ❌ JSearch error for '{keyword}': HTTP {e.response.status_code}")
+                if e.response.status_code == 429:
+                    print("     Rate limited — pausing 5s...")
+                    await asyncio.sleep(5)
             except Exception as e:
-                print(f"  ❌ Indeed RSS error for '{keyword}': {e}")
+                print(f"  ❌ JSearch error for '{keyword}': {e}")
 
-    print(f"  ✅ Indeed RSS: {len(results)} unique jobs found")
+    print(f"  ✅ JSearch: {len(results)} unique jobs found")
     return results
 
 
@@ -249,49 +161,43 @@ async def search_indeed_rss(
 
 async def discover_jobs(
     linkedin_api_key: str = "",
-    use_indeed: bool = True,
-    use_linkedin: bool = True,
+    use_indeed: bool = True,      # kept for API compat, ignored (Indeed blocked)
+    use_linkedin: bool = True,    # kept for API compat, ignored
 ) -> list[JobListing]:
     """
-    Run both discovery sources in parallel and return deduplicated results.
+    Run job discovery via JSearch and return deduplicated results.
+    JSearch covers LinkedIn, Indeed, Glassdoor, ZipRecruiter + more in one call.
     """
-    # Mike's target search keywords
+    api_key = linkedin_api_key  # reuse same RapidAPI key
+
+    # Mike's target search keywords — ordered by priority
     KEYWORDS = [
         "Unity XR Developer",
+        "Unity Developer",
+        "Unity Game Developer",
+        "Unity C#Developer",
         "Unity VR Developer",
-        "Unity AR Developer",
-        "Unity MR Developer",
+        "Unity AR MR Developer",
+        "XR Developer Unity C#",
         "XR Developer Unity",
+        "XR Developer Unity C#",
+        "XR Developer",
         "VR Developer Unity",
-        "Unity 3D Developer XR",
+        "Unity 3D XR Engineer",
         "AI Engineer Unity",
         "AI Training Engineer",
-        "Machine Learning Engineer Unity",
+        "Machine Learning Engineer game",
     ]
 
-    tasks = []
-    if use_linkedin and linkedin_api_key:
-        tasks.append(search_linkedin_rapidapi(
-            keywords=KEYWORDS[:5],   # Top 5 for LinkedIn (credit conservation)
-            remote_only=True,
-            api_key=linkedin_api_key,
-        ))
-    if use_indeed:
-        tasks.append(search_indeed_rss(
-            keywords=KEYWORDS,
-            remote_only=True,
-        ))
+    all_results = await search_jsearch(
+        keywords=KEYWORDS,
+        api_key=api_key,
+        remote_only=True,
+        days_posted=7,
+        limit_per_keyword=10,
+    )
 
-    all_results = []
-    if tasks:
-        results_list = await asyncio.gather(*tasks, return_exceptions=True)
-        for res in results_list:
-            if isinstance(res, Exception):
-                print(f"  ❌ Discovery source error: {res}")
-            else:
-                all_results.extend(res)
-
-    # Final dedup across sources
+    # Final dedup
     seen = set()
     deduped = []
     for job in all_results:

@@ -20,4 +20,5 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "rich>=14.3.3",
     "langgraph-checkpoint-sqlite>=2.0.0",
+    "feedparser>=6.0.12",
 ]
