@@ -5,3 +5,8 @@ data/
 __pycache__/
 *.pyc
 .DS_Store
+credentials.json
+token.json
+credentials.json
+token.json
+linkedin_session.json
