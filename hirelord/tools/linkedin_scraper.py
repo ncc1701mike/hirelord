@@ -105,8 +105,6 @@ async def fetch_linkedin_job(
         try:
             await page.goto(url, timeout=30000, wait_until="domcontentloaded")
             await asyncio.sleep(3) # Small human-like delay
-            print(f"  DEBUG: page URL after load = {page.url}")  # add this
-            print(f"  DEBUG: page title = {await page.title()}")  # add this
 
             # Check if redirected to login (session expired)
             if "login" in page.url or "authwall" in page.url:
@@ -262,36 +260,25 @@ async def fetch_linkedin_job(
                     return '';
                 }""")
 
-            # DEBUG
-                debug_html = await page.evaluate("""() => {
-                    return Array.from(document.querySelectorAll('[class]'))
-                        .filter(el => el.innerText && el.innerText.trim().length > 200)
-                        .slice(0, 5)
-                        .map(el => el.className + ' :: ' + el.innerText.trim().slice(0, 100));
-                }""")
-                print(f"  DEBUG elements with content:")
-                for d in debug_html:
-                    print(f"    {d}")
+             # ← NEW: Clean up description — extract just the JD content
+            if description and "About the job" in description:
+                description = description.split("About the job", 1)[1].strip()
+            elif description and "About the Job" in description:
+                description = description.split("About the Job", 1)[1].strip()
 
-                # ← NEW: Clean up description — extract just the JD content
-                if description and "About the job" in description:
-                    description = description.split("About the job", 1)[1].strip()
-                elif description and "About the Job" in description:
-                    description = description.split("About the Job", 1)[1].strip()
-
-                noise_phrases = [
-                    "Use AI to assess how you fit",
-                    "Show match details",
-                    "Tailor my resume",
-                    "Help me stand out",
-                    "Retry Premium",
-                    "Get AI-powered advice",
-                ]
-                if description:
-                    lines = description.split("\n")
-                    clean_lines = [l for l in lines 
-                                   if not any(n in l for n in noise_phrases)]
-                    description = "\n".join(clean_lines).strip()
+            noise_phrases = [
+                "Use AI to assess how you fit",
+                "Show match details",
+                "Tailor my resume",
+                "Help me stand out",
+                "Retry Premium",
+                "Get AI-powered advice",
+            ]
+            if description:
+                lines = description.split("\n")
+                clean_lines = [l for l in lines 
+                                if not any(n in l for n in noise_phrases)]
+                description = "\n".join(clean_lines).strip()
 
             # Detect apply type
             apply_info = await page.evaluate("""() => {
