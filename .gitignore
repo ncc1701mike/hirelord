@@ -1,12 +1,23 @@
-.env
-*.db
-data/
-.venv/
+# Python
 __pycache__/
 *.pyc
+.venv/
+
+# macOS
 .DS_Store
+
+# Local data
+*.db
+data/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
 credentials.json
 token.json
-credentials.json
-token.json
+*_session.json
 linkedin_session.json
+secrets/
+*.pem
+*.key
